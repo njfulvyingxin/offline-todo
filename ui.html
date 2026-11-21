@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>offline-todo</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --card:#ffffff; --ink:#1e2329; --mute:#8b93a1;
+    --line:#e6e8ec; --accent:#4f7cf7; --red:#e5484d; --orange:#f08c1e; --green:#2fa36b;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.6 "Microsoft YaHei","PingFang SC","Hiragino Sans GB","Noto Sans CJK SC",system-ui,sans-serif;
+    padding:28px 16px 60px;
+  }
+  .wrap{max-width:720px;margin:0 auto;}
+
+  .head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px;}
+  .head h1{font-size:24px;margin:0;letter-spacing:.5px;}
+  .head .sub{color:var(--mute);font-size:13px;text-align:right;}
+
+  .alert{
+    background:#fff5f5;border:1px solid #ffd8d8;border-left:3px solid var(--red);
+    border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13.5px;
+  }
+  .alert .lead{font-weight:600;color:var(--red);margin-bottom:2px;}
+  .alert .item{color:#5c4040;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+  .add{
+    display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;padding:10px;box-shadow:0 1px 2px rgba(20,30,50,.04);
+  }
+  .add input[type=text]{flex:1;min-width:0;border:0;outline:0;font:inherit;background:transparent;padding:6px 8px;color:var(--ink);}
+  .add input[type=text]::placeholder{color:#b3b9c4;}
+  .add input[type=date]{
+    border:1px solid var(--line);border-radius:8px;padding:4px 6px;font:inherit;
+    color:var(--mute);background:#fbfbfc;font-size:13px;flex:0 0 auto;
+  }
+  .add button{
+    border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;
+    padding:6px 16px;cursor:pointer;flex:0 0 auto;
+  }
+  .add button:hover{filter:brightness(1.06);}
+
+  ul{list-style:none;padding:0;margin:16px 0 0;}
+  li.row{
+    display:flex;align-items:flex-start;gap:10px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;
+    box-shadow:0 1px 2px rgba(20,30,50,.03);
+  }
+  li.row.done{opacity:.55;}
+  li.row.tight{border-left:3px solid var(--orange);}
+  li.row.over{border-left:3px solid var(--red);}
+
+  .box{
+    width:18px;height:18px;flex:0 0 18px;margin-top:3px;border-radius:6px;
+    border:1.5px solid #c8cdd6;cursor:pointer;display:flex;align-items:center;
+    justify-content:center;font-size:12px;color:transparent;user-select:none;
+  }
+  .box:hover{border-color:var(--accent);}
+  li.row.done .box{background:var(--green);border-color:var(--green);color:#fff;}
+
+  .body{flex:1;min-width:0;}
+  .title{word-break:break-word;}
+  li.row.done .title{text-decoration:line-through;}
+  .meta{font-size:12px;color:var(--mute);margin-top:2px;}
+  .meta b{font-weight:600;}
+  .meta.over b{color:var(--red);}
+  .meta.tight b{color:var(--orange);}
+
+  .del{border:0;background:transparent;color:#c3c8d1;font-size:16px;cursor:pointer;padding:0 2px;line-height:1;flex:0 0 auto;}
+  .del:hover{color:var(--red);}
+
+  .empty{color:var(--mute);text-align:center;padding:34px 0;font-size:14px;}
+
+  details{margin-top:22px;}
+  summary{cursor:pointer;color:var(--mute);font-size:13px;outline:none;list-style:none;}
+  summary::-webkit-details-marker{display:none;}
+  summary::before{content:"▸ ";}
+  details[open] summary::before{content:"▾ ";}
+
+  .foot{margin-top:34px;text-align:center;}
+  .quit{color:#b3b9c4;font-size:12px;cursor:pointer;border-bottom:1px dashed #d3d8e0;padding-bottom:1px;user-select:none;}
+  .quit:hover{color:var(--red);border-color:var(--red);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>offline-todo</h1>
+    <div class="sub" id="sub"></div>
+  </div>
+
+  <div class="alert" id="alert" style="display:none">
+    <div class="lead" id="alertLead"></div>
+    <div id="alertItems"></div>
+  </div>
+
+  <div class="add">
+    <input type="text" id="title" placeholder="要做什么？回车就加" autocomplete="off">
+    <input type="date" id="due" title="截止日期（可以不填）">
+    <button id="addBtn">加</button>
+  </div>
+
+  <ul id="list"></ul>
+  <div class="empty" id="empty" style="display:none">空着。挺好。</div>
+
+  <details id="doneBox" style="display:none">
+    <summary>已完成 <span id="doneCount"></span></summary>
+    <ul id="doneList"></ul>
+  </details>
+
+  <div class="foot">
+    <span id="quit" class="quit">关掉 offline-todo</span>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+async function api(path, data) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data || {})
+  });
+  return r.json();
+}
+
+// 用本地零点算天数差，避免时区/DST 把「今天」算成「明天」
+function daysLeft(due) {
+  if (!due) return null;
+  const t = new Date();
+  t.setHours(0, 0, 0, 0);
+  const d = new Date(due + 'T00:00:00');
+  return Math.round((d - t) / 86400000);
+}
+
+function dueText(d) {
+  if (d === null) return '';
+  if (d < 0) return `过期 ${-d} 天`;
+  if (d === 0) return '今天到期';
+  if (d === 1) return '明天到期';
+  return `还剩 ${d} 天`;
+}
+
+function row(it) {
+  const d = daysLeft(it.due);
+  const li = document.createElement('li');
+  li.className = 'row' +
+    (it.done ? ' done' : '') +
+    (!it.done && d !== null && d < 0 ? ' over' : '') +
+    (!it.done && d !== null && d >= 0 && d <= 2 ? ' tight' : '');
+
+  const box = document.createElement('div');
+  box.className = 'box';
+  box.textContent = '✓';
+  box.title = it.done ? '撤销' : '做完了';
+  box.onclick = () => api('/api/toggle', {id: it.id}).then(load);
+
+  const body = document.createElement('div');
+  body.className = 'body';
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = it.title;
+  title.title = '双击修改';
+  title.ondblclick = () => {
+    const t = prompt('改成什么？', it.title);
+    if (t === null) return;
+    const dd = prompt('截止日期（YYYY-MM-DD，留空表示没有）', it.due || '');
+    if (dd === null) return;
+    api('/api/edit', {id: it.id, title: t, due: dd.trim()}).then(load);
+  };
+  body.appendChild(title);
+
+  if (it.due) {
+    const meta = document.createElement('div');
+    meta.className = 'meta' + (d < 0 ? ' over' : (d <= 2 ? ' tight' : ''));
+    meta.innerHTML = '<b></b> · <span></span>';
+    meta.querySelector('b').textContent = dueText(d);
+    meta.querySelector('span').textContent = it.due;
+    body.appendChild(meta);
+  }
+
+  const del = document.createElement('button');
+  del.className = 'del';
+  del.textContent = '×';
+  del.title = '删掉';
+  del.onclick = () => {
+    if (confirm('删掉「' + it.title + '」？')) api('/api/delete', {id: it.id}).then(load);
+  };
+
+  li.append(box, body, del);
+  return li;
+}
+
+async function load() {
+  const r = await fetch('/api/list');
+  const {items, today} = await r.json();
+
+  const open = items.filter(i => !i.done);
+  const done = items.filter(i => i.done);
+
+  // 有 DDL 的按日期先后，没有的沉底；同档按添加顺序
+  const key = i => i.due || '9999-99-99';
+  open.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id - b.id);
+  done.sort((a, b) => b.id - a.id);
+
+  const list = $('#list');
+  list.innerHTML = '';
+  open.forEach(i => list.appendChild(row(i)));
+
+  const empty = $('#empty');
+  empty.style.display = open.length ? 'none' : 'block';
+  empty.textContent = done.length ? '手头的事都做完了。' : '空着。挺好。';
+
+  const doneBox = $('#doneBox');
+  doneBox.style.display = done.length ? 'block' : 'none';
+  $('#doneCount').textContent = done.length ? '(' + done.length + ')' : '';
+  const dl = $('#doneList');
+  dl.innerHTML = '';
+  done.forEach(i => dl.appendChild(row(i)));
+
+  // 顶部提醒条：过期 + 今天到期
+  const over = open.filter(i => { const d = daysLeft(i.due); return d !== null && d < 0; });
+  const todayDue = open.filter(i => daysLeft(i.due) === 0);
+  const alertBox = $('#alert');
+  if (over.length || todayDue.length) {
+    let lead = [];
+    if (over.length) lead.push(`过期 ${over.length} 件`);
+    if (todayDue.length) lead.push(`今天到期 ${todayDue.length} 件`);
+    $('#alertLead').textContent = lead.join(' · ');
+    const box = $('#alertItems');
+    box.innerHTML = '';
+    over.concat(todayDue).slice(0, 4).forEach(i => {
+      const d = document.createElement('div');
+      d.className = 'item';
+      d.textContent = dueText(daysLeft(i.due)) + '  ' + i.title;
+      box.appendChild(d);
+    });
+    alertBox.style.display = 'block';
+  } else {
+    alertBox.style.display = 'none';
+  }
+
+  let sub = today.replace(/-/g, '/') + ` · 待办 ${open.length} 件`;
+  $('#sub').textContent = sub;
+  document.title = open.length ? `(${open.length}) offline-todo` : 'offline-todo';
+}
+
+async function add() {
+  const t = $('#title').value.trim();
+  if (!t) { $('#title').focus(); return; }
+  const r = await api('/api/add', {title: t, due: $('#due').value});
+  if (!r.ok) { alert(r.error || '加不上'); return; }
+  $('#title').value = '';
+  $('#due').value = '';
+  $('#title').focus();
+  load();
+}
+
+$('#addBtn').onclick = add;
+$('#title').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+$('#due').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+
+$('#quit').onclick = async () => {
+  await api('/quit');
+  document.body.innerHTML =
+    '<div class="wrap" style="text-align:center;padding-top:80px;color:#8b93a1">' +
+    '已经关掉了。<br>这个页面可以直接关，要再用就重新启动一次。</div>';
+};
+
+load();
+</script>
+</body>
+</html>

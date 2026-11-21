@@ -1,0 +1,4 @@
+# 统一换行，避免在 Windows 上 checkout 出来的脚本在 Linux 跑不了
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
