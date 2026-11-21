@@ -68,6 +68,24 @@ python app.py --no-browser  # 不自动开浏览器
 
 圆角和半透明靠 Windows 的色键透明实现，所以 mac/Linux 上会显示成直角方块——功能一样，只是没那么好看。`TODO_WIDGET_OPAQUE=1 python widget.py` 可以关掉透明（比如在某些远程桌面里发虚的时候）。
 
+### 开机自启
+
+不想每次手动点它：
+
+```bash
+python autostart.py --install    # 装：下次登录桌面卡片自己出现
+python autostart.py --status     # 看现在装了没、装在哪个文件
+python autostart.py --uninstall  # 撤掉，不留痕迹
+```
+
+装的就是一个几行的启动脚本，放在系统的「登录时自动运行」目录里：
+
+- Windows：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\offline-todo-widget.cmd`
+- Linux：`~/.config/autostart/offline-todo-widget.desktop`
+- macOS：没做
+
+想手动撤销也行，去上面那个目录把 `offline-todo-widget` 删了即可。
+
 ## 怎么用
 
 | 操作 | 怎么做 |
@@ -98,6 +116,7 @@ offline-todo/
 ├── app.py              # 后端：读写 JSON、HTTP 接口、启动时弹提醒
 ├── ui.html             # 前端：整个界面就这一个文件，没有构建步骤
 ├── widget.py           # 桌面卡片：浮在屏幕上，和网页版共用一份数据
+├── autostart.py        # 开机自启的安装/卸载/查看
 ├── start.bat           # Windows 双击入口（网页版）
 ├── start-widget.bat    # Windows 双击入口（桌面卡片，不留黑框）
 ├── start.sh            # macOS / Linux 入口（网页版）
@@ -127,7 +146,7 @@ offline-todo/
 
 ## 已知限制
 
-- **只有启动时才会提醒。** 网页版没开就没有弹窗——桌面卡片能解决「看不见」的问题，但开机自启还得你自己放进启动目录。
+- **只有程序在跑的时候才会提醒。** 桌面卡片解决「看不见」，开机自启解决「忘了开」，但真到点了主动弹窗催你，还没有。
 - 桌面卡片同一时间只该开一个，双击两次会叠两张（暂时没有单实例锁）。
 - 单机单用户，没有多端同步，这是设计取舍不是 bug。
 - 没有重复任务（「每周三交作业」得手动加）。
@@ -137,8 +156,9 @@ offline-todo/
 
 - [x] v1：增删改查、倒计时、过期标色、启动提醒
 - [x] 桌面卡片：临期的事贴在桌面上，点一下完成
-- [ ] 开机自启 / 常驻托盘，关掉窗口也在后台盯着
-- [ ] 系统定时提醒，不打开也能催
+- [x] 开机自启：登录后卡片自己出来
+- [ ] 单实例锁（开两个会叠在一起）
+- [ ] 常驻托盘 + 到点弹窗提醒，不打开也能催
 - [ ] 重复任务
 - [ ] 优先级与标签
 - [ ] 导入导出（.ics / Markdown）
