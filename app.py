@@ -138,9 +138,7 @@ class Handler(BaseHTTPRequestHandler):
                     "done": False,
                     "created": date.today().isoformat(),
                 }
-                mins = minutes_or_none(data.get("remind_before"))
-                if mins is not None:
-                    item["remind_before"] = mins
+                apply_remind(item, data)
                 items.append(item)
 
             elif self.path == "/api/toggle":
@@ -169,24 +167,23 @@ class Handler(BaseHTTPRequestHandler):
                         if new_due != (it.get("due") or ""):
                             remind.reset_clock(it)   # 时间改了，提醒从头算
                         it["due"] = new_due
-                        if "remind_before" in data:
-                            mins = minutes_or_none(data.get("remind_before"))
-                            if mins is None:
-                                it.pop("remind_before", None)
-                            else:
-                                it["remind_before"] = mins
+                        apply_remind(it, data)
                         break
                 else:
                     return self._json({"ok": False, "error": "找不到这一条"}, 404)
 
             elif self.path == "/api/remind":
+                payload = dict(data)
+                if "minutes" in payload:            # 网页版传的是 minutes，统一成 remind_list
+                    payload["remind_list"] = payload.pop("minutes")
                 for it in items:
                     if it.get("id") == data.get("id"):
-                        mins = minutes_or_none(data.get("minutes"))
-                        if mins is None:
-                            it.pop("remind_before", None)   # 回到全局默认
-                        else:
-                            it["remind_before"] = mins
+                        apply_remind(it, payload)
+                        if "no_repeat" in data:
+                            if data.get("no_repeat"):
+                                it["no_repeat"] = True
+                            else:
+                                it.pop("no_repeat", None)
                         remind.reset_clock(it)
                         break
                 else:
@@ -200,14 +197,39 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- 提醒
-def minutes_or_none(raw):
-    """接口里传进来的提前量：None/'' → 用全局默认；0 → 这条不提醒；其余按分钟。"""
+def minutes_list(raw):
+    """接口里传进来的提前量，统一成列表：
+    None/'' → 用全局默认（返回 None）；[] 或 0 → 这条不提醒（返回 []）；
+    数字 → [数字]；列表 → 去重、从远到近、最多 5 个。"""
     if raw is None or raw == "":
         return None
+    if isinstance(raw, (list, tuple)):
+        out = []
+        for v in raw:
+            try:
+                m = int(v)
+            except (TypeError, ValueError):
+                continue
+            if m > 0:
+                out.append(m)
+        return sorted(set(out), reverse=True)[:remind.MAX_POINTS]
     try:
-        return max(0, int(raw))
+        m = int(raw)
     except (TypeError, ValueError):
         return None
+    return [] if m <= 0 else [m]
+
+
+def apply_remind(item, data):
+    """把 remind_list / remind_before 落到 item 上（没传就一个字都不动）。"""
+    if "remind_list" not in data and "remind_before" not in data:
+        return
+    vals = minutes_list(data.get("remind_list", data.get("remind_before")))
+    item.pop("remind_before", None)
+    if vals is None:
+        item.pop("remind_list", None)      # 回到全局默认
+    else:
+        item["remind_list"] = vals          # [] = 这条不提醒
 
 
 def widget_running():

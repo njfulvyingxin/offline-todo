@@ -85,10 +85,12 @@
   .menu{
     position:fixed;z-index:50;background:#fff;border:1px solid var(--line);
     border-radius:10px;box-shadow:0 10px 28px rgba(20,30,50,.16);padding:6px;min-width:158px;
+    max-height:66vh;overflow:auto;
   }
   .menu div{padding:6px 10px;border-radius:7px;cursor:pointer;font-size:13px;}
   .menu div:hover{background:#f1f4fa;}
   .menu div.cur{color:var(--accent);font-weight:600;}
+  .menu div i.ck{display:inline-block;width:15px;font-style:normal;color:var(--accent);}
   .menu .sep{height:1px;background:var(--line);margin:5px 4px;padding:0;pointer-events:none;}
 
   .cfg{margin-top:18px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px 12px;}
@@ -219,32 +221,130 @@ function remindLabel(v) {
   return hit ? hit[1].replace('提前 ', '') : Number(v) + ' 分钟';
 }
 
-// ---- 小菜单（单条的提醒提前量）
-let openMenuEl = null;
-function closeMenu() {
-  if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; }
+// 这一条设了几个提前量：null = 用全局默认，[] = 不提醒，其余是分钟列表
+function itemTimes(it) {
+  const raw = it.remind_list;
+  if (raw === undefined || raw === null) {
+    const b = it.remind_before;
+    if (b === undefined || b === null || b === '') return null;
+    return [Number(b)];
+  }
+  return (raw || []).map(Number).filter(v => v > 0);
 }
-document.addEventListener('click', closeMenu);
 
-function showMenu(anchor, current, onPick) {
-  closeMenu();
+function remindText(it) {
+  const t = itemTimes(it);
+  if (t === null) return '默认';
+  if (!t.length) return '不提醒';
+  if (t.length === 1) return remindLabel(t[0]);
+  return t.length + ' 个提醒';
+}
+
+// ---- 小菜单（单条的提前量，可以勾好几个）
+let openMenuEl = null;
+let menuDirty = false;
+
+function closeMenu(reload) {
+  if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; }
+  if (reload) load();
+}
+
+document.addEventListener('click', () => {
+  if (openMenuEl) closeMenu(menuDirty);
+});
+
+function showRemindMenu(anchor, it, onBadge) {
+  closeMenu(false);
+  menuDirty = false;
+  const cur = (itemTimes(it) || []).slice();
+
   const el = document.createElement('div');
   el.className = 'menu';
-  const opts = [[null, '用默认设置']].concat(REMIND_OPTS).concat([[0, '这条不提醒']]);
-  opts.forEach(([v, text]) => {
-    if (text === '这条不提醒') {
-      const sep = document.createElement('div');
-      sep.className = 'sep';
-      el.appendChild(sep);
-    }
+
+  const save = (list, extra) => {
+    menuDirty = true;
+    const body = Object.assign({id: it.id}, extra || {});
+    if (!extra || !('no_repeat' in extra)) body.minutes = list;
+    return api('/api/remind', body).catch(() => {});
+  };
+
+  const mark = (row, on, text) => {
+    row.className = on ? 'cur' : '';
+    row.innerHTML = '';
+    const ck = document.createElement('i');
+    ck.className = 'ck';
+    ck.textContent = on ? '✓' : '';
+    row.appendChild(ck);
+    row.appendChild(document.createTextNode(text));
+  };
+
+  REMIND_OPTS.forEach(([v, text]) => {
     const row = document.createElement('div');
-    row.textContent = text;
-    const same = (v === null && (current === null || current === undefined || current === '')) ||
-                 (v !== null && Number(v) === Number(current));
-    if (same) row.className = 'cur';
-    row.onclick = e => { e.stopPropagation(); closeMenu(); onPick(v); };
+    mark(row, cur.includes(v), text);
+    row.onclick = e => {
+      e.stopPropagation();
+      const i = cur.indexOf(v);
+      if (i >= 0) cur.splice(i, 1); else cur.push(v);
+      mark(row, cur.includes(v), text);
+      save(cur.slice());
+      onBadge(cur.length === 0 ? '不提醒'
+        : cur.length === 1 ? remindLabel(cur[0]) : cur.length + ' 个提醒');
+    };
     el.appendChild(row);
   });
+
+  const custom = document.createElement('div');
+  mark(custom, false, '自定义…（分钟，逗号分隔）');
+  custom.onclick = e => {
+    e.stopPropagation();
+    const s = prompt('提前多少分钟？可以用逗号分开，比如 90,1440（1440 = 1 天）', cur.join(','));
+    if (s === null) return;
+    const vals = s.split(/[,，\s]+/).map(Number).filter(x => x > 0);
+    cur.length = 0; cur.push(...vals);
+    save(cur.slice()).then(() => closeMenu(true));
+    onBadge(cur.length === 0 ? '不提醒'
+      : cur.length === 1 ? remindLabel(cur[0]) : cur.length + ' 个提醒');
+  };
+  el.appendChild(custom);
+
+  const sep = document.createElement('div');
+  sep.className = 'sep';
+  el.appendChild(sep);
+
+  const dflt = document.createElement('div');
+  mark(dflt, false, '用全局默认');
+  dflt.onclick = e => {
+    e.stopPropagation();
+    it.remind_list = null;
+    save(null).then(() => closeMenu(true));
+    onBadge('默认');
+  };
+  el.appendChild(dflt);
+
+  const none = document.createElement('div');
+  mark(none, false, '这条不提醒');
+  none.onclick = e => {
+    e.stopPropagation();
+    cur.length = 0;
+    save([]).then(() => closeMenu(true));
+    onBadge('不提醒');
+  };
+  el.appendChild(none);
+
+  const sep2 = document.createElement('div');
+  sep2.className = 'sep';
+  el.appendChild(sep2);
+
+  const nr = document.createElement('div');
+  mark(nr, !!it.no_repeat, '到点之后别再催我');
+  nr.onclick = e => {
+    e.stopPropagation();
+    it.no_repeat = !it.no_repeat;
+    mark(nr, !!it.no_repeat, '到点之后别再催我');
+    save(cur.slice(), {no_repeat: !!it.no_repeat});
+  };
+  el.appendChild(nr);
+
   document.body.appendChild(el);
   const r = anchor.getBoundingClientRect();
   const top = Math.min(window.innerHeight - el.offsetHeight - 8, r.bottom + 6);
@@ -297,13 +397,18 @@ function row(it) {
   }
 
   const bell = document.createElement('button');
-  bell.className = 'bell' + (it.remind_before !== undefined && it.remind_before !== null ? ' on' : '');
-  bell.innerHTML = '🔔<span>' + remindLabel(it.remind_before) + '</span>';
-  bell.title = '提前多久提醒（点一下改）';
+  const t0 = itemTimes(it);
+  bell.className = 'bell' + (t0 !== null ? ' on' : '');
+  bell.textContent = '🔔';
+  const badge = document.createElement('span');
+  badge.textContent = remindText(it);
+  bell.appendChild(badge);
+  bell.title = '提前多久提醒（点一下，可以勾好几个）';
   bell.onclick = e => {
     e.stopPropagation();
-    showMenu(bell, it.remind_before, v => {
-      api('/api/remind', {id: it.id, minutes: v}).then(load);
+    showRemindMenu(bell, it, txt => {
+      badge.textContent = txt;
+      bell.className = 'bell' + (itemTimes(it) !== null ? ' on' : '');
     });
   };
 

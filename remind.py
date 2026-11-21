@@ -205,16 +205,35 @@ def save_settings(settings):
 
 
 def minutes_for(item, settings=None):
-    """这一条提前多少分钟提醒。0 = 这条不提醒；没单独设就用全局默认。"""
+    """这一条最远那个提前量（分钟）。0 = 这条不提醒；没单独设就用全局默认。"""
+    times = item_times(item, settings)
+    return times[0] if times else 0
+
+
+MAX_POINTS = 5
+
+
+def item_times(item, settings=None):
+    """这条要提前几个时间点提醒：分钟数列表，从远到近（比如 [1440, 120]）。
+    空列表 = 这条不提醒；从来没设过 = 用全局默认那一个。"""
     settings = settings or load_settings()
-    v = item.get("remind_before")
-    if v is None or v == "":
-        return int(settings.get("default_minutes") or 0)
-    try:
-        v = int(v)
-    except (TypeError, ValueError):
-        return int(settings.get("default_minutes") or 0)
-    return max(0, v)
+    raw = item.get("remind_list")
+    if raw is None:
+        b = item.get("remind_before")
+        if b is None or b == "":
+            b = settings.get("default_minutes") or 0
+        raw = [b]
+    elif isinstance(raw, (int, float, str)):
+        raw = [raw]
+    out = []
+    for v in raw:
+        try:
+            m = int(v)
+        except (TypeError, ValueError):
+            continue
+        if m > 0:
+            out.append(m)
+    return sorted(set(out), reverse=True)[:MAX_POINTS]
 
 
 # ---------------------------------------------------------------- 该弹谁
@@ -234,11 +253,9 @@ def due_reminders(items, settings=None, now=None):
         due = parse_due(it.get("due"))
         if due is None:
             continue
-        window = minutes_for(it, settings)
-        if window <= 0:                      # 这条设了「不提醒」
+        times = item_times(it, settings)
+        if not times:                        # 这条设了「不提醒」
             continue
-        if now < due - timedelta(minutes=window):
-            continue                          # 还没进窗口
         if now > due + timedelta(days=OVERDUE_GRACE_DAYS):
             continue                          # 过期太久了，别再念
 
@@ -251,7 +268,23 @@ def due_reminders(items, settings=None, now=None):
             except (TypeError, ValueError, OSError):
                 pass
 
-        # 已经催过的：等 repeat 分钟，并且别超过次数上限
+        # ① 还没弹过的提前量，从远到近取第一个到点的
+        fired = set(str(x) for x in (it.get("remind_fired") or []))
+        picked = None
+        for t in times:
+            if str(t) in fired:
+                continue
+            if now >= due - timedelta(minutes=t):
+                picked = t
+                break
+        if picked is not None:
+            mark_point(it, picked, now)
+            out.append((it, due, (due - now).total_seconds() / 60))
+            continue
+
+        # ② 所有提前量都弹过了：按 repeat 的节奏接着催
+        if it.get("no_repeat"):
+            continue
         count = 0
         try:
             count = int(it.get("remind_count") or 0)
@@ -267,10 +300,23 @@ def due_reminders(items, settings=None, now=None):
             except (TypeError, ValueError, OSError):
                 pass
 
+        mark_reminded(it, now)
         out.append((it, due, (due - now).total_seconds() / 60))
 
     out.sort(key=lambda x: x[2])
     return out
+
+
+def mark_point(item, minutes, now=None):
+    """记一笔：这条的「提前 N 分钟」已经弹过了。顺便把重复催的冷却重新计时。"""
+    now = now or datetime.now()
+    fired = [str(x) for x in (item.get("remind_fired") or [])]
+    if str(minutes) not in fired:
+        fired.append(str(minutes))
+    item["remind_fired"] = fired
+    item["remind_at"] = now.timestamp()
+    item.pop("snooze_until", None)
+    return item
 
 
 def mark_reminded(item, now=None):
@@ -296,3 +342,4 @@ def reset_clock(item):
     item.pop("remind_at", None)
     item.pop("remind_count", None)
     item.pop("snooze_until", None)
+    item.pop("remind_fired", None)
