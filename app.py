@@ -17,14 +17,18 @@ import os
 import socket
 import sys
 import threading
+import time
 import webbrowser
-from datetime import date
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import remind
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, "data")
 DATA_FILE = os.path.join(DATA_DIR, "todos.json")
 UI_FILE = os.path.join(BASE, "ui.html")
+ALIVE_FILE = os.path.join(DATA_DIR, "widget.alive")
 LOCK = threading.Lock()
 
 DEFAULT_PORT = 8765
@@ -84,7 +88,10 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self._send(500, "找不到 ui.html".encode("utf-8"), "text/plain; charset=utf-8")
         elif self.path == "/api/list":
-            self._json({"items": load(), "today": date.today().isoformat()})
+            self._json({"items": load(), "today": date.today().isoformat(),
+                        "settings": remind.load_settings()})
+        elif self.path == "/api/settings":
+            self._json(remind.load_settings())
         elif self.path == "/favicon.ico":
             self._send(204)
         else:
@@ -111,24 +118,36 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         with LOCK:
+            if self.path == "/api/settings":
+                cur = remind.load_settings()
+                for k in ("enabled", "default_minutes", "repeat_minutes", "max_repeats"):
+                    if k in data:
+                        cur[k] = data[k]
+                return self._json({"ok": True, "settings": remind.save_settings(cur)})
+
             items = load()
 
             if self.path == "/api/add":
                 title = (data.get("title") or "").strip()
                 if not title:
                     return self._json({"ok": False, "error": "内容不能空着"}, 400)
-                items.append({
+                item = {
                     "id": next_id(items),
                     "title": title,
                     "due": (data.get("due") or "").strip(),
                     "done": False,
                     "created": date.today().isoformat(),
-                })
+                }
+                mins = minutes_or_none(data.get("remind_before"))
+                if mins is not None:
+                    item["remind_before"] = mins
+                items.append(item)
 
             elif self.path == "/api/toggle":
                 for it in items:
                     if it.get("id") == data.get("id"):
                         it["done"] = not it.get("done")
+                        remind.reset_clock(it)
                         break
                 else:
                     return self._json({"ok": False, "error": "找不到这一条"}, 404)
@@ -146,7 +165,29 @@ class Handler(BaseHTTPRequestHandler):
                 for it in items:
                     if it.get("id") == data.get("id"):
                         it["title"] = title
-                        it["due"] = (data.get("due") or "").strip()
+                        new_due = (data.get("due") or "").strip()
+                        if new_due != (it.get("due") or ""):
+                            remind.reset_clock(it)   # 时间改了，提醒从头算
+                        it["due"] = new_due
+                        if "remind_before" in data:
+                            mins = minutes_or_none(data.get("remind_before"))
+                            if mins is None:
+                                it.pop("remind_before", None)
+                            else:
+                                it["remind_before"] = mins
+                        break
+                else:
+                    return self._json({"ok": False, "error": "找不到这一条"}, 404)
+
+            elif self.path == "/api/remind":
+                for it in items:
+                    if it.get("id") == data.get("id"):
+                        mins = minutes_or_none(data.get("minutes"))
+                        if mins is None:
+                            it.pop("remind_before", None)   # 回到全局默认
+                        else:
+                            it["remind_before"] = mins
+                        remind.reset_clock(it)
                         break
                 else:
                     return self._json({"ok": False, "error": "找不到这一条"}, 404)
@@ -159,20 +200,38 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- 提醒
-def due_soon():
-    """48 小时内到期 + 已过期，按紧急程度排好。"""
-    today = date.today()
+def minutes_or_none(raw):
+    """接口里传进来的提前量：None/'' → 用全局默认；0 → 这条不提醒；其余按分钟。"""
+    if raw is None or raw == "":
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def widget_running():
+    """桌面卡片在自己活着的时候会不断 touch data/widget.alive，超过 90 秒就当它没开。"""
+    try:
+        return time.time() - os.path.getmtime(ALIVE_FILE) < 90
+    except OSError:
+        return False
+
+
+def due_soon(within_days=2):
+    """within_days 天内到期 + 已经过期的，按时间排好。"""
+    now = datetime.now()
     hot = []
     for it in load():
-        if it.get("done") or not it.get("due"):
+        if it.get("done"):
             continue
-        try:
-            d = (date.fromisoformat(it["due"]) - today).days
-        except ValueError:
+        due = remind.parse_due(it.get("due"))
+        if due is None:
             continue
-        if d <= 2:
-            hot.append((d, it["title"]))
-    hot.sort()
+        mins = (due - now).total_seconds() / 60
+        if mins <= within_days * 1440:
+            hot.append((mins, it.get("title", "")))
+    hot.sort(key=lambda x: x[0])
     return hot
 
 
@@ -189,15 +248,20 @@ def native_popup(lines):
 
 
 def popup_remind():
+    """启动时兜底弹一次。
+
+    桌面卡片开着的时候它自己会按「提前多久」提醒，这里就别重复吓人一遍。
+    """
+    if widget_running():
+        return
     hot = due_soon()
     if not hot:
         return
-    lines = []
-    for d, title in hot[:8]:
-        tag = f"过期 {abs(d)} 天" if d < 0 else ("今天到期" if d == 0 else ("明天到期" if d == 1 else f"还剩 {d} 天"))
-        lines.append(f"· {tag}   {title}")
+    lines = [f"· {remind.fmt_left(m)}   {title}" for m, title in hot[:8]]
     if len(hot) > 8:
         lines.append(f"…… 还有 {len(hot) - 8} 件")
+    lines.append("")
+    lines.append("（桌面卡片开着的话，它会按你设的提前量提醒，这里就不重复了）")
     native_popup(lines)
 
 

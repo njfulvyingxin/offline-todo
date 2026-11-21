@@ -34,10 +34,11 @@
   }
   .add input[type=text]{flex:1;min-width:0;border:0;outline:0;font:inherit;background:transparent;padding:6px 8px;color:var(--ink);}
   .add input[type=text]::placeholder{color:#b3b9c4;}
-  .add input[type=date]{
+  .add input[type=date], .add input[type=time]{
     border:1px solid var(--line);border-radius:8px;padding:4px 6px;font:inherit;
     color:var(--mute);background:#fbfbfc;font-size:13px;flex:0 0 auto;
   }
+  .add input[type=time]{width:88px;}
   .add button{
     border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;
     padding:6px 16px;cursor:pointer;flex:0 0 auto;
@@ -73,6 +74,29 @@
   .del{border:0;background:transparent;color:#c3c8d1;font-size:16px;cursor:pointer;padding:0 2px;line-height:1;flex:0 0 auto;}
   .del:hover{color:var(--red);}
 
+  .bell{
+    border:0;background:transparent;color:#b9c0cc;font-size:13px;cursor:pointer;
+    padding:2px 6px;border-radius:8px;flex:0 0 auto;line-height:1.3;white-space:nowrap;
+  }
+  .bell:hover{background:#eef1f6;color:var(--accent);}
+  .bell.on{color:var(--accent);}
+  .bell span{font-size:11px;margin-left:2px;}
+
+  .menu{
+    position:fixed;z-index:50;background:#fff;border:1px solid var(--line);
+    border-radius:10px;box-shadow:0 10px 28px rgba(20,30,50,.16);padding:6px;min-width:158px;
+  }
+  .menu div{padding:6px 10px;border-radius:7px;cursor:pointer;font-size:13px;}
+  .menu div:hover{background:#f1f4fa;}
+  .menu div.cur{color:var(--accent);font-weight:600;}
+  .menu .sep{height:1px;background:var(--line);margin:5px 4px;padding:0;pointer-events:none;}
+
+  .cfg{margin-top:18px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px 12px;}
+  .cfg .line{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:13.5px;flex-wrap:wrap;}
+  .cfg .line label{color:#4a5260;flex:0 0 auto;}
+  .cfg select{font:inherit;font-size:13px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:#fbfbfc;color:var(--ink);}
+  .cfg .hint{color:var(--mute);font-size:12px;}
+
   .empty{color:var(--mute);text-align:center;padding:34px 0;font-size:14px;}
 
   details{margin-top:22px;}
@@ -101,8 +125,30 @@
   <div class="add">
     <input type="text" id="title" placeholder="要做什么？回车就加" autocomplete="off">
     <input type="date" id="due" title="截止日期（可以不填）">
+    <input type="time" id="dueTime" title="具体时间（不填按当天 23:59 算）">
     <button id="addBtn">加</button>
   </div>
+
+  <details class="cfg" id="cfgBox">
+    <summary>提醒设置</summary>
+    <div class="line">
+      <label>默认提前</label>
+      <select id="cfgDefault"></select>
+      <span class="hint">单条可以在右边铃铛里单独改</span>
+    </div>
+    <div class="line">
+      <label>没做完的话，隔多久再催</label>
+      <select id="cfgRepeat"></select>
+    </div>
+    <div class="line">
+      <label>同一条最多催几次</label>
+      <select id="cfgMax"></select>
+    </div>
+    <div class="line">
+      <label><input type="checkbox" id="cfgEnabled"> 开启桌面提醒</label>
+      <span class="hint">关掉之后桌面卡片不再弹提醒，网页版照常显示</span>
+    </div>
+  </details>
 
   <ul id="list"></ul>
   <div class="empty" id="empty" style="display:none">空着。挺好。</div>
@@ -129,30 +175,92 @@ async function api(path, data) {
   return r.json();
 }
 
-// 用本地零点算天数差，避免时区/DST 把「今天」算成「明天」
-function daysLeft(due) {
+// ---- 时间：due 可以是 '2026-11-25'（当天 23:59）或 '2026-11-25 14:00'
+function parseDue(due) {
   if (!due) return null;
-  const t = new Date();
-  t.setHours(0, 0, 0, 0);
-  const d = new Date(due + 'T00:00:00');
-  return Math.round((d - t) / 86400000);
+  const s = String(due).trim().replace('T', ' ');
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{1,2}):(\d{2}))?$/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3],
+                     m[4] ? +m[4] : 23, m[5] ? +m[5] : 59, 0, 0);
+  return isNaN(d.getTime()) ? null : d;
 }
 
-function dueText(d) {
-  if (d === null) return '';
-  if (d < 0) return `过期 ${-d} 天`;
-  if (d === 0) return '今天到期';
-  if (d === 1) return '明天到期';
-  return `还剩 ${d} 天`;
+function leftMinutes(due) {
+  const d = parseDue(due);
+  if (!d) return null;
+  return (d - Date.now()) / 60000;
+}
+
+function fmtLeft(mins) {
+  let m = Math.round(Math.abs(mins));
+  let body;
+  if (m >= 1440) body = Math.floor(m / 1440) + ' 天';
+  else if (m >= 60) body = Math.floor(m / 60) + ' 小时' + (m % 60 ? ' ' + (m % 60) + ' 分' : '');
+  else body = m + ' 分钟';
+  return (mins < 0 ? '已过 ' : '还有 ') + body;
+}
+
+function dueText(due) {
+  const m = leftMinutes(due);
+  return m === null ? '' : fmtLeft(m);
+}
+
+const REMIND_OPTS = [
+  [15, '提前 15 分钟'], [30, '提前 30 分钟'], [60, '提前 1 小时'],
+  [120, '提前 2 小时'], [180, '提前 3 小时'], [360, '提前 6 小时'],
+  [720, '提前半天'], [1440, '提前 1 天'], [2880, '提前 2 天'],
+];
+
+function remindLabel(v) {
+  if (v === null || v === undefined || v === '') return '默认';
+  if (Number(v) === 0) return '不提醒';
+  const hit = REMIND_OPTS.find(o => o[0] === Number(v));
+  return hit ? hit[1].replace('提前 ', '') : Number(v) + ' 分钟';
+}
+
+// ---- 小菜单（单条的提醒提前量）
+let openMenuEl = null;
+function closeMenu() {
+  if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; }
+}
+document.addEventListener('click', closeMenu);
+
+function showMenu(anchor, current, onPick) {
+  closeMenu();
+  const el = document.createElement('div');
+  el.className = 'menu';
+  const opts = [[null, '用默认设置']].concat(REMIND_OPTS).concat([[0, '这条不提醒']]);
+  opts.forEach(([v, text]) => {
+    if (text === '这条不提醒') {
+      const sep = document.createElement('div');
+      sep.className = 'sep';
+      el.appendChild(sep);
+    }
+    const row = document.createElement('div');
+    row.textContent = text;
+    const same = (v === null && (current === null || current === undefined || current === '')) ||
+                 (v !== null && Number(v) === Number(current));
+    if (same) row.className = 'cur';
+    row.onclick = e => { e.stopPropagation(); closeMenu(); onPick(v); };
+    el.appendChild(row);
+  });
+  document.body.appendChild(el);
+  const r = anchor.getBoundingClientRect();
+  const top = Math.min(window.innerHeight - el.offsetHeight - 8, r.bottom + 6);
+  const left = Math.min(window.innerWidth - el.offsetWidth - 8, r.left - el.offsetWidth + r.width);
+  el.style.top = Math.max(8, top) + 'px';
+  el.style.left = Math.max(8, left) + 'px';
+  openMenuEl = el;
 }
 
 function row(it) {
-  const d = daysLeft(it.due);
+  const m = leftMinutes(it.due);
   const li = document.createElement('li');
   li.className = 'row' +
     (it.done ? ' done' : '') +
-    (!it.done && d !== null && d < 0 ? ' over' : '') +
-    (!it.done && d !== null && d >= 0 && d <= 2 ? ' tight' : '');
+    (!it.done && m !== null && m < 0 ? ' over' : '') +
+    (!it.done && m !== null && m >= 0 && m <= 1440 ? ' tight' : '');
 
   const box = document.createElement('div');
   box.className = 'box';
@@ -169,20 +277,35 @@ function row(it) {
   title.ondblclick = () => {
     const t = prompt('改成什么？', it.title);
     if (t === null) return;
-    const dd = prompt('截止日期（YYYY-MM-DD，留空表示没有）', it.due || '');
+    const dd = prompt('截止日期（YYYY-MM-DD，留空表示没有）', (it.due || '').slice(0, 10));
     if (dd === null) return;
-    api('/api/edit', {id: it.id, title: t, due: dd.trim()}).then(load);
+    const tt = prompt('几点？（HH:MM，留空按 23:59）',
+      (it.due || '').length > 10 ? it.due.slice(11) : '');
+    if (tt === null) return;
+    const due = dd.trim() ? (dd.trim() + (tt.trim() ? ' ' + tt.trim() : '')) : '';
+    api('/api/edit', {id: it.id, title: t, due}).then(load);
   };
   body.appendChild(title);
 
   if (it.due) {
     const meta = document.createElement('div');
-    meta.className = 'meta' + (d < 0 ? ' over' : (d <= 2 ? ' tight' : ''));
+    meta.className = 'meta' + (m < 0 ? ' over' : (m <= 1440 ? ' tight' : ''));
     meta.innerHTML = '<b></b> · <span></span>';
-    meta.querySelector('b').textContent = dueText(d);
+    meta.querySelector('b').textContent = dueText(it.due);
     meta.querySelector('span').textContent = it.due;
     body.appendChild(meta);
   }
+
+  const bell = document.createElement('button');
+  bell.className = 'bell' + (it.remind_before !== undefined && it.remind_before !== null ? ' on' : '');
+  bell.innerHTML = '🔔<span>' + remindLabel(it.remind_before) + '</span>';
+  bell.title = '提前多久提醒（点一下改）';
+  bell.onclick = e => {
+    e.stopPropagation();
+    showMenu(bell, it.remind_before, v => {
+      api('/api/remind', {id: it.id, minutes: v}).then(load);
+    });
+  };
 
   const del = document.createElement('button');
   del.className = 'del';
@@ -192,20 +315,20 @@ function row(it) {
     if (confirm('删掉「' + it.title + '」？')) api('/api/delete', {id: it.id}).then(load);
   };
 
-  li.append(box, body, del);
+  li.append(box, body, bell, del);
   return li;
 }
 
 async function load() {
   const r = await fetch('/api/list');
-  const {items, today} = await r.json();
+  const {items, today, settings} = await r.json();
 
   const open = items.filter(i => !i.done);
   const done = items.filter(i => i.done);
 
-  // 有 DDL 的按日期先后，没有的沉底；同档按添加顺序
-  const key = i => i.due || '9999-99-99';
-  open.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id - b.id);
+  // 有 DDL 的按时间先后，没有的沉底；同一时刻按添加顺序
+  const key = i => { const d = parseDue(i.due); return d ? d.getTime() : 8.64e15; };
+  open.sort((a, b) => key(a) - key(b) || a.id - b.id);
   done.sort((a, b) => b.id - a.id);
 
   const list = $('#list');
@@ -223,21 +346,22 @@ async function load() {
   dl.innerHTML = '';
   done.forEach(i => dl.appendChild(row(i)));
 
-  // 顶部提醒条：过期 + 今天到期
-  const over = open.filter(i => { const d = daysLeft(i.due); return d !== null && d < 0; });
-  const todayDue = open.filter(i => daysLeft(i.due) === 0);
+  // 顶部提醒条：过期 + 一天内到期
+  const mins = i => leftMinutes(i.due);
+  const over = open.filter(i => { const m = mins(i); return m !== null && m < 0; });
+  const soon = open.filter(i => { const m = mins(i); return m !== null && m >= 0 && m <= 1440; });
   const alertBox = $('#alert');
-  if (over.length || todayDue.length) {
-    let lead = [];
+  if (over.length || soon.length) {
+    const lead = [];
     if (over.length) lead.push(`过期 ${over.length} 件`);
-    if (todayDue.length) lead.push(`今天到期 ${todayDue.length} 件`);
+    if (soon.length) lead.push(`一天内到期 ${soon.length} 件`);
     $('#alertLead').textContent = lead.join(' · ');
     const box = $('#alertItems');
     box.innerHTML = '';
-    over.concat(todayDue).slice(0, 4).forEach(i => {
+    over.concat(soon).slice(0, 4).forEach(i => {
       const d = document.createElement('div');
       d.className = 'item';
-      d.textContent = dueText(daysLeft(i.due)) + '  ' + i.title;
+      d.textContent = dueText(i.due) + '  ' + i.title;
       box.appendChild(d);
     });
     alertBox.style.display = 'block';
@@ -245,18 +369,67 @@ async function load() {
     alertBox.style.display = 'none';
   }
 
-  let sub = today.replace(/-/g, '/') + ` · 待办 ${open.length} 件`;
-  $('#sub').textContent = sub;
+  fillSettings(settings || {});
+
+  $('#sub').textContent = today.replace(/-/g, '/') + ` · 待办 ${open.length} 件`;
   document.title = open.length ? `(${open.length}) offline-todo` : 'offline-todo';
 }
+
+// ---- 设置面板
+function opt(sel, value, text) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  sel.appendChild(o);
+}
+
+function ensureOpt(sel, v, text) {
+  if (![...sel.options].some(o => o.value === String(v))) opt(sel, String(v), text);
+}
+
+function fillSettings(s) {
+  const d = $('#cfgDefault');
+  if (!d.options.length) {
+    REMIND_OPTS.forEach(([v, t]) => opt(d, String(v), t));
+    const rp = $('#cfgRepeat');
+    [[10, '10 分钟'], [30, '30 分钟'], [60, '1 小时'], [120, '2 小时']]
+      .forEach(([v, t]) => opt(rp, String(v), t));
+    const mx = $('#cfgMax');
+    [[1, '1 次'], [2, '2 次'], [3, '3 次'], [5, '5 次']]
+      .forEach(([v, t]) => opt(mx, String(v), t));
+  }
+  // 手改过 settings.json、或者用了下拉里没有的值，也照样能显示出来
+  if (s.default_minutes !== undefined) {
+    ensureOpt(d, s.default_minutes, '提前 ' + remindLabel(s.default_minutes));
+    d.value = String(s.default_minutes);
+  }
+  if (s.repeat_minutes !== undefined) {
+    ensureOpt($('#cfgRepeat'), s.repeat_minutes, s.repeat_minutes + ' 分钟');
+    $('#cfgRepeat').value = String(s.repeat_minutes);
+  }
+  if (s.max_repeats !== undefined) {
+    ensureOpt($('#cfgMax'), s.max_repeats, s.max_repeats + ' 次');
+    $('#cfgMax').value = String(s.max_repeats);
+  }
+  if (s.enabled !== undefined) $('#cfgEnabled').checked = !!s.enabled;
+}
+
+$('#cfgDefault').onchange = e => api('/api/settings', {default_minutes: +e.target.value}).then(load);
+$('#cfgRepeat').onchange = e => api('/api/settings', {repeat_minutes: +e.target.value}).then(load);
+$('#cfgMax').onchange = e => api('/api/settings', {max_repeats: +e.target.value}).then(load);
+$('#cfgEnabled').onchange = e => api('/api/settings', {enabled: e.target.checked}).then(load);
 
 async function add() {
   const t = $('#title').value.trim();
   if (!t) { $('#title').focus(); return; }
-  const r = await api('/api/add', {title: t, due: $('#due').value});
+  const day = $('#due').value.trim();
+  const hm = $('#dueTime').value.trim();
+  const due = day ? (day + (hm ? ' ' + hm : '')) : '';
+  const r = await api('/api/add', {title: t, due});
   if (!r.ok) { alert(r.error || '加不上'); return; }
   $('#title').value = '';
   $('#due').value = '';
+  $('#dueTime').value = '';
   $('#title').focus();
   load();
 }
@@ -264,6 +437,7 @@ async function add() {
 $('#addBtn').onclick = add;
 $('#title').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
 $('#due').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+$('#dueTime').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
 
 $('#quit').onclick = async () => {
   await api('/quit');
