@@ -12,6 +12,7 @@
 
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,109 @@ def parse_due(s):
             dt = dt.replace(hour=23, minute=59)
         return dt
     return None
+
+
+# ---------------------------------------------------------------- 顺手写时间
+# 卡片上可以直接写「交作业 明天」「实验报告 周五 18:00」「复盘 11-25」，
+# 下面这几个正则就是干这个的：从末尾剥掉时间、再剥掉日期，剩下的就是标题。
+_DAY_WORDS = {"今天": 0, "明天": 1, "后天": 2, "大后天": 3}
+_NIGHT_WORDS = {"今晚": (0, 20), "明晚": (1, 20), "明早": (1, 8)}
+_WEEK_WORDS = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5,
+               "日": 6, "天": 6, "1": 0, "2": 1, "3": 2, "4": 3,
+               "5": 4, "6": 5, "7": 6}
+_AMPM = {"凌晨": 0, "早上": 0, "上午": 0, "中午": 12,
+         "下午": 12, "傍晚": 12, "晚上": 12}
+
+_TIME_RE = re.compile(
+    r"(?:(凌晨|早上|上午|中午|下午|傍晚|晚上)\s*)?"
+    r"(\d{1,2})\s*(?:[:：]\s*(\d{2})|点\s*(\d{1,2}|半)?\s*分?|时)\s*$")
+_DAY_RE = re.compile(r"(今天|明天|后天|大后天|今晚|明晚|明早)\s*$")
+_WEEK_RE = re.compile(r"(下|这|本)?\s*(?:周|星期|礼拜)\s*([一二三四五六日天1-7])\s*$")
+_MD_RE = re.compile(r"(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*[日号]?\s*$")
+_REL_RE = re.compile(r"(\d{1,3})\s*天(?:之)?后\s*$")
+
+
+def parse_when(text, now=None):
+    """「交作业 明天」→ ('交作业', '2026-11-22 23:59')；认不出就原样返回 (text, None)。"""
+    s = (text or "").strip()
+    now = now or datetime.now()
+    day = None
+    hour = minute = None
+    has_time = False
+
+    # 1) 末尾的时间
+    m = _TIME_RE.search(s)
+    if m:
+        h = int(m.group(2))
+        mi = 0
+        if m.group(3):
+            mi = int(m.group(3))
+        elif m.group(4):
+            mi = 30 if m.group(4) == "半" else int(m.group(4))
+        if m.group(1) and h < 12:
+            h += _AMPM[m.group(1)]
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            hour, minute, has_time = h, mi, True
+            s = s[:m.start()].rstrip()
+
+    # 2) 末尾的日期
+    m = _DAY_RE.search(s)
+    if m:
+        word = m.group(1)
+        if word in _NIGHT_WORDS:
+            off, hh = _NIGHT_WORDS[word]
+            if not has_time:
+                hour, minute, has_time = hh, 0, True
+            elif hour < 12 and hh >= 12:
+                hour += 12        # 「今晚 8 点」= 20:00，别当成早上八点
+            day = (now + timedelta(days=off)).date()
+        else:
+            day = (now + timedelta(days=_DAY_WORDS[word])).date()
+        s = s[:m.start()].rstrip()
+    if day is None:
+        m = _REL_RE.search(s)
+        if m:
+            day = (now + timedelta(days=int(m.group(1)))).date()
+            s = s[:m.start()].rstrip()
+    if day is None:
+        m = _WEEK_RE.search(s)
+        if m:
+            target = _WEEK_WORDS[m.group(2)]
+            delta = (target - now.weekday()) % 7
+            if m.group(1) == "下" or (delta == 0 and now.hour >= 23):
+                delta = delta or 7
+            day = (now + timedelta(days=delta)).date()
+            s = s[:m.start()].rstrip()
+    if day is None:
+        m = _MD_RE.search(s)
+        if m:
+            mm, dd = int(m.group(1)), int(m.group(2))
+            year = now.year
+            try:
+                day = datetime(year, mm, dd).date()
+            except ValueError:
+                day = None
+            else:
+                # 写的是很久以前的日期，多半是说明年
+                if (now.date() - day).days > 30:
+                    try:
+                        day = datetime(year + 1, mm, dd).date()
+                    except ValueError:
+                        day = None
+                s = s[:m.start()].rstrip()
+
+    if day is None and not has_time:
+        return s, None       # 啥也没认出来，当没日期
+    if day is None:
+        day = now.date()
+        if datetime(day.year, day.month, day.day, hour, minute) <= now:
+            day = day + timedelta(days=1)   # 只说「3 点」，已经过了就是明天
+    if not has_time:
+        hour, minute = 23, 59
+
+    title = s if s.strip() else (text or "").strip()   # 只写了「今晚」时，标题别变空
+    due = datetime(day.year, day.month, day.day, hour, minute)
+    return title, due.strftime(DUE_FMT)
 
 
 def fmt_left(delta_minutes):

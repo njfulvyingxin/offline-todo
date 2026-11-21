@@ -43,6 +43,7 @@ WIDTH = 272
 PAD = 14
 ROW_H = 30
 HEAD_H = 30
+ADD_H = 28
 MAX_ROWS = 6
 
 CARD_BG = "#1b1e27"
@@ -99,6 +100,10 @@ def save_conf(conf):
             json.dump(conf, f, ensure_ascii=False)
     except OSError:
         pass
+
+
+def next_id(items):
+    return max([int(it.get("id", 0)) for it in items] + [0]) + 1
 
 
 def minutes_left(item, now):
@@ -209,6 +214,13 @@ class Widget:
         self.hover_id = None
         self.drag = None        # (x_root, y_root, win_x, win_y, moved)
         self.popups = {}        # item_id -> 正在显示的那张提醒卡
+        self.entry = None       # 正在输入的那个输入框
+        self.editing = None     # ("add", None) 或 ("row", item_id)
+        self.toast = None       # {"text", "undo": (下标, 条目), "until"}
+        self.add_y0 = self.add_y1 = 0
+        self._click_job = None
+        self._click_iid = None
+        self._closing = False
 
         self._bind()
         self._place_window()
@@ -238,6 +250,7 @@ class Widget:
         c.bind("<ButtonPress-1>", self.on_press)
         c.bind("<B1-Motion>", self.on_drag)
         c.bind("<ButtonRelease-1>", self.on_release)
+        c.bind("<Double-Button-1>", self.on_double)
         c.bind("<Motion>", self.on_motion)
         c.bind("<Leave>", lambda e: self.set_hover(None))
         c.bind("<Button-3>", self.on_menu)
@@ -268,9 +281,35 @@ class Widget:
             self.conf["y"] = self.root.winfo_y()
             save_conf(self.conf)
             return
+        if self.add_y0 <= e.y <= self.add_y1:
+            if self.toast and self.toast.get("undo"):
+                self.undo_delete()
+            else:
+                self.begin_add()
+            return
         hit = self.row_at(e.y)
         if hit is not None:
-            self.toggle(hit)
+            # 先别急着打勾：等 230 毫秒，看是不是双击（双击是「改」）
+            self._click_iid = hit
+            self._click_job = self.root.after(230, self._click_toggle)
+
+    def _click_toggle(self):
+        self._click_job = None
+        iid, self._click_iid = self._click_iid, None
+        if iid is not None:
+            self.toggle(iid)
+
+    def on_double(self, e):
+        if self._click_job is not None:
+            try:
+                self.root.after_cancel(self._click_job)
+            except tk.TclError:
+                pass
+            self._click_job = None
+        self._click_iid = None
+        hit = self.row_at(e.y)
+        if hit is not None:
+            self.begin_edit(hit)
 
     def on_motion(self, e):
         hit = self.row_at(e.y)
@@ -292,7 +331,15 @@ class Widget:
                 self.canvas.itemconfigure(f"rowbg{iid}", fill=fill)
 
     def on_menu(self, e):
+        hit = self.row_at(e.y)
         m = tk.Menu(self.root, tearoff=0)
+        if hit is not None:
+            m.add_command(label="修改这条", command=lambda: self.begin_edit(hit))
+            m.add_command(label="删除这条", command=lambda: self.delete(hit))
+            m.add_separator()
+        else:
+            m.add_command(label="新建一条", command=self.begin_add)
+            m.add_separator()
         m.add_command(label="打开完整界面", command=self.open_web)
         self.topmost_var = tk.BooleanVar(value=bool(self.root.attributes("-topmost")))
         m.add_checkbutton(label="不挡窗口", variable=self.topmost_var,
@@ -341,12 +388,170 @@ class Widget:
         for it in items:
             if it.get("id") == item_id:
                 it["done"] = not it.get("done")
+                remind.reset_clock(it)
                 break
         else:
             return
         save_items(items)
         self.stamp = self._stamp()
         self.refresh()
+
+    # -- 在卡片上直接加 / 改 / 删
+    def begin_add(self):
+        if self.entry is not None:
+            return
+        y = self.add_y0 if self.add_y1 else PAD + HEAD_H
+        self._open_entry("add", "", y)
+
+    def begin_edit(self, iid):
+        if self.entry is not None:
+            return
+        for it in load_items():
+            if it.get("id") == iid:
+                break
+        else:
+            return
+        for r_iid, y0, _y1, _m in self.rows:
+            if r_iid == iid:
+                self._open_entry("row", str(it.get("title", "")), y0)
+                self.editing_item = it      # _open_entry 会先清空，所以要放在它后面
+                return
+
+    def _open_entry(self, kind, text, y):
+        self._close_entry()
+        self.editing = (kind, None)
+        self.entry = tk.Entry(self.root, font=self.f_row, bg=HOVER_BG, fg=TEXT,
+                              insertbackground=TEXT, relief="flat", bd=0,
+                              highlightthickness=0)
+        self.entry.insert(0, text)
+        self.entry.select_range(0, "end")
+        self.entry.icursor("end")
+        self._entry_win = self.canvas.create_window(
+            PAD + 20, y + (ADD_H if kind == "add" else ROW_H) / 2,
+            window=self.entry, anchor="w",
+            width=WIDTH - PAD * 2 - 24, height=max(18, min(ROW_H, ADD_H) - 6),
+            tags="entrywin")
+        self.entry.focus_force()
+        self.entry.bind("<Return>", lambda e: (self._commit_entry(), "break")[1])
+        self.entry.bind("<KP_Enter>", lambda e: (self._commit_entry(), "break")[1])
+        self.entry.bind("<Escape>", lambda e: (self._cancel_entry(), "break")[1])
+        self.entry.bind("<FocusOut>", self._on_blur)
+
+    def _on_blur(self, _e=None):
+        if self.entry is None or self._closing:
+            return
+        self._closing = True
+        try:
+            self._cancel_entry()      # 点了别处 = 不保存，免得半句没写完的东西混进去
+        finally:
+            self._closing = False
+
+    def _commit_entry(self):
+        if self.entry is None:
+            return
+        kind = self.editing[0] if self.editing else "add"
+        item = getattr(self, "editing_item", None)     # _close_entry 会清掉，先抓住
+        raw = self.entry.get().strip()
+        self._close_entry()
+        if not raw:
+            self.refresh()
+            return
+
+        if kind == "add":
+            title, due = remind.parse_when(raw)
+            title = title.strip()
+            if not title:
+                self._say("只写了时间，没写要做什么")
+                return
+            items = load_items()
+            items.append({
+                "id": next_id(items),
+                "title": title,
+                "due": due or "",
+                "done": False,
+                "created": datetime.now().date().isoformat(),
+            })
+            save_items(items)
+            self.stamp = self._stamp()
+            if due:
+                self._say(f"加好了 · {due[5:]}")
+            else:
+                self._say("加好了")
+            return
+
+        if not item:
+            self.refresh()
+            return
+        title, due = remind.parse_when(raw)
+        title = title.strip()
+        if not title:
+            self._say("标题不能空着")
+            return
+        items = load_items()
+        for it in items:
+            if it.get("id") == item.get("id"):
+                changed_due = (it.get("due") or "") != (due or "")
+                it["title"] = title
+                it["due"] = due or ""
+                if changed_due:
+                    remind.reset_clock(it)
+                break
+        save_items(items)
+        self.stamp = self._stamp()
+        self._say("改好了")
+
+    def _cancel_entry(self):
+        self._close_entry()
+        self.refresh()
+
+    def _close_entry(self):
+        if self.entry is not None:
+            try:
+                self.entry.destroy()
+            except tk.TclError:
+                pass
+            self.entry = None
+        self.editing = None
+        self.editing_item = None
+        try:
+            self.canvas.delete("entrywin")
+        except tk.TclError:
+            pass
+
+    def delete(self, iid):
+        items = load_items()
+        for i, it in enumerate(items):
+            if it.get("id") == iid:
+                gone = items.pop(i)
+                save_items(items)
+                self.stamp = self._stamp()
+                name = self._fit(str(gone.get("title", "")), 120, self.f_small)
+                self._say(f"删了「{name}」 · 点这里撤销", undo=(i, gone))
+                return
+
+    def undo_delete(self):
+        t = self.toast or {}
+        undo = t.get("undo")
+        self.toast = None
+        if not undo:
+            self.refresh()
+            return
+        idx, gone = undo
+        items = load_items()
+        items.insert(min(idx, len(items)), gone)
+        save_items(items)
+        self.stamp = self._stamp()
+        self.refresh()
+
+    def _say(self, text, undo=None):
+        self.toast = {"text": text, "undo": undo, "until": time.time() + 6}
+        self.refresh()
+        self.root.after(6200, self._clear_toast)
+
+    def _clear_toast(self):
+        if self.toast and time.time() >= self.toast.get("until", 0) - 0.5:
+            self.toast = None
+            self.refresh()
 
     def _stamp(self):
         try:
@@ -420,6 +625,8 @@ class Widget:
 
     # -- 画
     def refresh(self):
+        if self.entry is not None:
+            return          # 正在打字，别把输入框刷没了
         self.stamp = self._stamp()
         now = datetime.now()
         items = load_items()
@@ -432,7 +639,8 @@ class Widget:
             if m is not None and m <= 1440:
                 n_hot += 1
 
-        height = PAD + HEAD_H + max(1, len(rows)) * ROW_H + PAD
+        body_h = max(1, len(rows)) * ROW_H
+        height = PAD + HEAD_H + body_h + ADD_H + PAD
         self.canvas.configure(height=height, width=WIDTH)
         self.canvas.delete("all")
         self.rows = []
@@ -454,13 +662,30 @@ class Widget:
             self.canvas.create_text(WIDTH - PAD, y + ROW_H // 2 - 6,
                                     text=f"共 {len(pending)} 件", anchor="ne",
                                     fill=MUTED, font=self.f_small)
-            return
+        else:
+            for m, it in rows:
+                iid = it.get("id")
+                self._row(y, m, str(it.get("title", "")), iid)
+                self.rows.append((iid, y, y + ROW_H, m))
+                y += ROW_H
 
-        for m, it in rows:
-            iid = it.get("id")
-            self._row(y, m, str(it.get("title", "")), iid)
-            self.rows.append((iid, y, y + ROW_H, m))
-            y += ROW_H
+        self._add_row(y)
+
+    def _add_row(self, y):
+        """最下面那一行：平时是「＋ 要做什么」，刚删完会短暂变成「撤销」。"""
+        self.add_y0, self.add_y1 = y, y + ADD_H
+        c = self.canvas
+        c.create_line(PAD - 4, y, WIDTH - PAD + 4, y, fill=CARD_LINE)
+        cy = y + ADD_H / 2
+        if self.toast:
+            undo = self.toast.get("undo")
+            c.create_text(PAD + 2, cy, text=self.toast["text"], anchor="w",
+                          fill=BLUE if undo else MUTED, font=self.f_small)
+        else:
+            c.create_text(PAD + 2, cy, text="＋ 要做什么", anchor="w",
+                          fill=MUTED, font=self.f_row)
+            c.create_text(WIDTH - PAD, cy, text="回车就加", anchor="e",
+                          fill="#5b6478", font=self.f_small)
 
     def _card(self, w, h):
         r = 14
