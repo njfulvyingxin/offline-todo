@@ -134,6 +134,8 @@ python autostart.py --uninstall  # 撤掉，不留痕迹
 - 不想被接着催：在同一个菜单里勾上「到点之后别再催我」
 - 最多 5 个提前量；「自定义…」里能填任意分钟数（比如 `90,1440`）
 
+![勾好几个提前量](screenshots/remind-menu.png)
+
 还有两个旋钮在同一个面板里：
 
 - **没做完隔多久再催**（默认 30 分钟）
@@ -186,7 +188,8 @@ offline-todo/
 ├── screenshots/
 │   ├── main.png
 │   ├── widget.png
-│   └── reminder.png
+│   ├── reminder.png
+│   └── remind-menu.png
 ├── data/todos.json     # 你的数据（不提交）
 ├── data/settings.json  # 提醒设置（不提交）
 ├── LICENSE
