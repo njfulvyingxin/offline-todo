@@ -19,6 +19,7 @@ offline-todo 桌面卡片 —— 把临期的事直接贴在桌面上，不用�
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -58,6 +59,12 @@ BLUE = "#7c93ff"
 GREEN = "#46c98b"
 
 MAGIC = "#0a0b0c"  # 这个颜色会被当成透明（仅 Windows 支持）
+
+# 卡片里那页「提醒设置」
+REMIND_OPTS = [(15, "提前 15 分钟"), (30, "提前 30 分钟"), (60, "提前 1 小时"),
+               (120, "提前 2 小时"), (180, "提前 3 小时"), (360, "提前 6 小时"),
+               (720, "提前半天"), (1440, "提前 1 天"), (2880, "提前 2 天")]
+RM_H = 26          # 提醒页的行高，比主页紧一点
 
 REFRESH_MS = 2000
 CHECK_MS = 15000      # 每 15 秒看一眼该不该提醒
@@ -221,6 +228,9 @@ class Widget:
         self._click_job = None
         self._click_iid = None
         self._closing = False
+        self.mode = "list"      # "list" 或 "remind"（卡片翻到提醒设置那一页）
+        self.remind_iid = None
+        self._custom_y = 0
 
         self._bind()
         self._place_window()
@@ -254,7 +264,13 @@ class Widget:
         c.bind("<Motion>", self.on_motion)
         c.bind("<Leave>", lambda e: self.set_hover(None))
         c.bind("<Button-3>", self.on_menu)
-        self.root.bind("<Escape>", lambda e: self.close())
+        self.root.bind("<Escape>", self.on_escape)
+
+    def on_escape(self, _e=None):
+        if self.mode == "remind":
+            self.back_to_list()
+        else:
+            self.close()
 
     # -- 事件
     def on_press(self, e):
@@ -281,6 +297,8 @@ class Widget:
             self.conf["y"] = self.root.winfo_y()
             save_conf(self.conf)
             return
+        if self.mode != "list":
+            return          # 提醒设置页上点哪儿都不该触发打勾或加条目
         if self.add_y0 <= e.y <= self.add_y1:
             if self.toast and self.toast.get("undo"):
                 self.undo_delete()
@@ -307,6 +325,8 @@ class Widget:
                 pass
             self._click_job = None
         self._click_iid = None
+        if self.mode != "list":
+            return
         hit = self.row_at(e.y)
         if hit is not None:
             self.begin_edit(hit)
@@ -335,6 +355,7 @@ class Widget:
         m = tk.Menu(self.root, tearoff=0)
         if hit is not None:
             m.add_command(label="修改这条", command=lambda: self.begin_edit(hit))
+            m.add_command(label="提醒…", command=lambda: self.open_remind(hit))
             m.add_command(label="删除这条", command=lambda: self.delete(hit))
             m.add_separator()
         else:
@@ -377,6 +398,19 @@ class Widget:
         self.save_pos()
         self.root.destroy()
 
+    def open_remind(self, iid):
+        """右键 → 提醒…：卡片自己翻到提醒设置那一页，改完点返回。"""
+        self._close_custom()
+        self.mode = "remind"
+        self.remind_iid = iid
+        self.refresh()
+
+    def back_to_list(self):
+        self._close_custom()
+        self.mode = "list"
+        self.remind_iid = None
+        self.refresh()
+
     def save_pos(self):
         self.conf["x"] = self.root.winfo_x()
         self.conf["y"] = self.root.winfo_y()
@@ -398,7 +432,7 @@ class Widget:
 
     # -- 在卡片上直接加 / 改 / 删
     def begin_add(self):
-        if self.entry is not None:
+        if self.entry is not None or self.mode != "list":
             return
         y = self.add_y0 if self.add_y1 else PAD + HEAD_H
         self._open_entry("add", "", y)
@@ -627,6 +661,9 @@ class Widget:
     def refresh(self):
         if self.entry is not None:
             return          # 正在打字，别把输入框刷没了
+        if self.mode == "remind":
+            self.draw_remind()
+            return
         self.stamp = self._stamp()
         now = datetime.now()
         items = load_items()
@@ -662,6 +699,7 @@ class Widget:
             self.canvas.create_text(WIDTH - PAD, y + ROW_H // 2 - 6,
                                     text=f"共 {len(pending)} 件", anchor="ne",
                                     fill=MUTED, font=self.f_small)
+            y += ROW_H
         else:
             for m, it in rows:
                 iid = it.get("id")
@@ -686,6 +724,169 @@ class Widget:
                           fill=MUTED, font=self.f_row)
             c.create_text(WIDTH - PAD, cy, text="回车就加", anchor="e",
                           fill="#5b6478", font=self.f_small)
+
+    # -- 提醒设置那一页：右键「提醒…」翻过来，点「返回」翻回去
+    def draw_remind(self):
+        self.stamp = self._stamp()
+        item = None
+        for it in load_items():
+            if it.get("id") == self.remind_iid:
+                item = it
+                break
+        if item is None:
+            self.mode = "list"
+            self.refresh()
+            return
+
+        settings = remind.load_settings()
+        follows = not ("remind_list" in item or "remind_before" in item)
+        shown = set([settings.get("default_minutes")] if follows
+                    else remind.item_times(item, settings))
+
+        height = PAD + HEAD_H + RM_H + len(REMIND_OPTS) * RM_H \
+            + 10 + 3 * RM_H + RM_H + PAD
+        self.canvas.configure(height=height, width=WIDTH)
+        self.canvas.delete("all")
+        self.rows = []
+        self._card(WIDTH, height)
+
+        c = self.canvas
+        y = PAD
+        c.create_text(PAD, y + 2, text="到点提醒", anchor="nw", fill=TEXT,
+                      font=self.f_title)
+        back = c.create_text(WIDTH - PAD, y + 7, text="返回 ↩", anchor="ne",
+                             fill=BLUE, font=self.f_small)
+        c.tag_bind(back, "<Button-1>", lambda e: self.back_to_list())
+        c.tag_bind(back, "<Enter>", lambda e: c.configure(cursor="hand2"))
+        c.tag_bind(back, "<Leave>", lambda e: c.configure(cursor=""))
+        y += HEAD_H
+
+        title = self._fit(str(item.get("title", "")), WIDTH - PAD * 2, self.f_small)
+        c.create_text(PAD, y + RM_H / 2, text=title, anchor="w", fill=MUTED,
+                      font=self.f_small)
+        y += RM_H
+
+        for m, label in REMIND_OPTS:
+            on = m in shown
+            self._rm_row(y, label, on, (lambda mm=m: self._rm_toggle(mm)),
+                         TEXT if on else MUTED)
+            y += RM_H
+
+        c.create_line(PAD - 4, y + 5, WIDTH - PAD + 4, y + 5, fill=CARD_LINE)
+        y += 10
+        self._rm_row(y, "用全局默认", follows, self._rm_default, MUTED)
+        y += RM_H
+        self._rm_row(y, "这条不提醒", (not follows and not shown), self._rm_mute, MUTED)
+        y += RM_H
+        self._rm_row(y, "到点后别再催我", bool(item.get("no_repeat")),
+                     self._rm_no_repeat, MUTED)
+        y += RM_H
+
+        self._custom_y = y
+        if self.entry is None:
+            self._rm_row(y, "自定义…（逗号分隔）", False, self._rm_custom, MUTED)
+
+    def _rm_row(self, y, label, checked, on_click, color):
+        c = self.canvas
+        tag = f"rmr{y}"
+        c.create_rectangle(PAD - 6, y, WIDTH - PAD + 6, y + RM_H,
+                           fill=CARD_BG, outline="", tags=tag)
+        if checked:
+            c.create_text(PAD, y + RM_H / 2, text="✓", anchor="w", fill=GREEN,
+                          font=self.f_small, tags=tag)
+        c.create_text(PAD + 16, y + RM_H / 2, text=label, anchor="w", fill=color,
+                      font=self.f_small, tags=tag)
+        c.tag_bind(tag, "<Button-1>", lambda e: on_click())
+        c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+        c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+
+    def _rm_apply(self, fn):
+        items = load_items()
+        for it in items:
+            if it.get("id") == self.remind_iid:
+                fn(it)
+                remind.reset_clock(it)      # 改了提醒点，之前弹过的清零重来
+                break
+        else:
+            return
+        save_items(items)
+        self.refresh()
+
+    def _rm_toggle(self, minutes):
+        def fn(it):
+            cur = list(remind.item_times(it, remind.load_settings()))
+            if minutes in cur:
+                cur = [x for x in cur if x != minutes]
+            else:
+                cur = sorted(set(cur + [minutes]), reverse=True)[: remind.MAX_POINTS]
+            it["remind_list"] = cur
+        self._rm_apply(fn)
+
+    def _rm_default(self):
+        self._rm_apply(lambda it: (it.pop("remind_list", None),
+                                   it.pop("remind_before", None)))
+
+    def _rm_mute(self):
+        self._rm_apply(lambda it: it.__setitem__("remind_list", []))
+
+    def _rm_no_repeat(self):
+        self._rm_apply(lambda it: it.__setitem__(
+            "no_repeat", not it.get("no_repeat")))
+
+    def _rm_custom(self):
+        if self.entry is not None:
+            return
+        item = None
+        for it in load_items():
+            if it.get("id") == self.remind_iid:
+                item = it
+                break
+        if item is None:
+            return
+        base = remind.item_times(item, remind.load_settings())
+        self.entry = tk.Entry(self.root, font=self.f_small, bg=HOVER_BG, fg=TEXT,
+                              insertbackground=TEXT, relief="flat", bd=0,
+                              highlightthickness=0)
+        self.entry.insert(0, ",".join(str(m) for m in base))
+        self.entry.select_range(0, "end")
+        self.entry.bind("<Return>", self._rm_custom_commit)
+        self.entry.bind("<Escape>", lambda e: (self._close_custom(), "break"))
+        self._entry_win = self.canvas.create_window(
+            PAD + 16, self._custom_y + RM_H / 2, window=self.entry, anchor="w",
+            width=WIDTH - PAD * 2 - 20, height=18)
+        self.entry.focus_set()
+
+    def _rm_custom_commit(self, _e=None):
+        raw = self.entry.get() if self.entry is not None else ""
+        nums = []
+        for part in raw.replace("，", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                v = int(float(part))
+            except ValueError:
+                continue
+            if 0 < v <= 525600:
+                nums.append(v)
+        self._close_custom()
+        if nums:
+            keep = sorted(set(nums), reverse=True)[: remind.MAX_POINTS]
+            self._rm_apply(lambda it: it.__setitem__("remind_list", keep))
+        return "break"
+
+    def _close_custom(self):
+        if self.entry is None:
+            return False
+        try:
+            self.canvas.delete(self._entry_win)
+            self.entry.destroy()
+        except tk.TclError:
+            pass
+        self.entry = None
+        if self.mode == "remind":
+            self.refresh()
+        return True
 
     def _card(self, w, h):
         r = 14
